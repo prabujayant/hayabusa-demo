@@ -1067,6 +1067,353 @@ Teaching order matters: **steal credentials → escalate on the host → move to
 
 Hayabusa v4.2.0 ships **18 subcommands**. Everything the tool can do is on this list — run `.\hayabusa.exe help` to see it live.
 
+---
+
+### 1. `dfir-timeline` — the main command ⭐
+
+> *"Create a DFIR timeline."*
+
+**What it does:** Reads `.evtx` files, matches every event against every loaded rule, and writes one consolidated, severity-ranked timeline.
+
+```powershell
+.\hayabusa.exe dfir-timeline -d ".\EVTX-ATTACK-SAMPLES\Credential Access" -o report.csv -H report.html -w -C
+```
+
+**Why it matters:** This is 80% of what you will ever do with Hayabusa. Every other command is a specialised helper around it.
+
+**Key flags:**
+| Flag | Meaning |
+|---|---|
+| `-d` / `-f` | Scan a directory, or one file |
+| `-l` | Scan the **live** machine (`C:\Windows\System32\winevt\Logs`) |
+| `-o` | Output file |
+| `-t` | Format: `csv` (default), `json`, `jsonl` |
+| `-H` | Also write an HTML report |
+| `-p` | Output profile (`standard`, `verbose`, `super-verbose`…) |
+| `-m` | Minimum severity to load rules for |
+| `-w` | No wizard — scan everything without asking |
+| `-C` | Overwrite existing output |
+
+**Output:** a CSV with one row per detection, plus a console summary of severity counts, top rules, top hosts and date breakdowns.
+
+---
+
+### 2. `search` — hunt without rules ⭐
+
+> *"Search all events by keyword(s) or regular expression."*
+
+**What it does:** Free-text / regex search across raw event field values. **No detection rules involved** — this is raw data hunting.
+
+```powershell
+.\hayabusa.exe search -d ".\EVTX-ATTACK-SAMPLES\Credential Access" -k mimikatz
+```
+
+**Why it matters:** Rules only find what someone already thought to write a rule for. Hunting is the opposite — you search for something *you* suspect. This is the analyst's most powerful habit.
+
+**Key flags:**
+| Flag | Meaning |
+|---|---|
+| `-k` | Keyword. **Repeat the flag** for OR logic: `-k mimikatz -k lsass` |
+| `-a` | AND the keywords instead of OR |
+| `-r` | Regex instead of keywords |
+| `-i` | Case-insensitive |
+| `-F` | Filter by field (e.g. `-F Sysmon`) |
+| `-J` / `-L` | Save as JSON / JSONL |
+
+**Gotcha:** search reads **parsed field values**, not filenames — `-k sekurlsa` returns 0 findings even though the *filename* contains "sekurlsa".
+
+---
+
+### 3. `computer-metrics` — which host is noisy? ⭐
+
+> *"Output the total number of events according to computer names."*
+
+**What it does:** Counts events per hostname, and reports OS version, uptime and timezone.
+
+```powershell
+.\hayabusa.exe computer-metrics -d ".\EVTX-ATTACK-SAMPLES\Credential Access"
+```
+
+**Output:**
+```
+Total computers: 9
+LAPTOP-JU4M3I0E                 29,528 events
+IEWIN7                          96 events
+MSEDGEWIN10                     70 events
+...
+```
+
+**Why it matters:** Instant scoping. But **volume ≠ compromise** — `LAPTOP-JU4M3I0E` has the most events and zero critical alerts (see Step 8).
+
+---
+
+### 4. `logon-summary` — who logged in? ⭐
+
+> *"Output a summary of successful and failed logons."*
+
+**What it does:** Parses Security 4624 (success) and 4625 (failure) and summarises by account.
+
+```powershell
+.\hayabusa.exe logon-summary -d ".\EVTX-ATTACK-SAMPLES\Credential Access" -o logon-summary -C
+```
+
+**Output:** two files — `logon-summary-successful.csv` and `logon-summary-failed.csv`.
+
+**Why it matters:** A failed-logon spike means **guessing** (brute force). Almost no failures but odd successes means someone already **has** the passwords. Two incidents, two responses.
+
+---
+
+### 5. `eid-metrics` — which event IDs dominate?
+
+> *"Output event ID metrics."*
+
+**What it does:** Frequency table of event IDs across the dataset, with percentage, channel and a human description.
+
+```powershell
+.\hayabusa.exe eid-metrics -d ".\EVTX-ATTACK-SAMPLES"
+```
+
+**Why it matters:** Shows the *shape* of the data — which event types a log set is mostly made of. Useful for deciding which channels to focus a hunt on.
+
+---
+
+### 6. `log-metrics` — log file metadata
+
+> *"Output evtx file metadata."*
+
+**What it does:** Per-file inventory — size, channel, provider, first/last event, record count.
+
+```powershell
+.\hayabusa.exe log-metrics -d ".\EVTX-ATTACK-SAMPLES\Credential Access"
+```
+
+**Why it matters:** Log triage. Before analysing 278 files, find out what each one actually contains. Also reveals corrupted or empty logs early.
+
+---
+
+### 7. `pivot-keywords-list` — generate hunting pivots
+
+> *"Create a list of pivot keywords."*
+
+**What it does:** Extracts every distinct username, IP, process, command line and logon ID into separate `pivot-*.txt` files.
+
+```powershell
+.\hayabusa.exe pivot-keywords-list -d ".\EVTX-ATTACK-SAMPLES\Credential Access" -o pivot -w -C
+```
+
+**Output:** 12 files — `pivot-Users.txt`, `pivot-IP Addresses.txt`, `pivot-Processes.txt`, `pivot-Command Lines.txt`, `pivot-Logon IDs.txt`, etc.
+
+**Why it matters:** **This is how you turn one finding into many.** You find `mimikatz.exe` → add it to your pivot list → search every log for it. Pivoting is how a single detection becomes an investigation.
+
+---
+
+### 8. `config-critical-systems` — find DCs and file servers
+
+> *"Find critical systems like domain controllers and file servers."*
+
+**What it does:** Identifies critical infrastructure by the *behaviour* unique to those roles:
+- **Security 4768** (Kerberos TGT requested) → **domain controller**
+- **Security 5145** (network share access) → **file server**
+
+```powershell
+.\hayabusa.exe config-critical-systems -d ".\EVTX-ATTACK-SAMPLES\Credential Access"
+```
+
+**Output:**
+```
+Domain Controllers found (1):
+01566s-win16-ir.threebeesco.com
+```
+
+**Why it matters:** Hostnames added to `config\critical_systems.txt` get all alerts above `low` **raised one level** (capped at `emergency`). A `medium` alert on a domain controller becomes a `high`. Context changes priority.
+
+> **⚠️ Do NOT pipe this command.** It calls `unwrap()` on a terminal handle and panics if you pipe it:
+> ```
+> thread 'main' panicked at src\timeline\config_critical_systems.rs:190:26:
+> called `Result::unwrap()` on an `Err` value: IO(Custom { kind: NotConnected, error: "not a terminal" })
+> ```
+> Run it bare, straight to the screen. It also **writes to** `config\critical_systems.txt`.
+
+---
+
+### 9. `extract-base64` — decode obfuscated payloads
+
+> *"Extract and decode base64 strings from events."*
+
+**What it does:** Finds base64-encoded blobs in event data and decodes them.
+
+```powershell
+.\hayabusa.exe extract-base64 -d ".\EVTX-ATTACK-SAMPLES\Credential Access"
+```
+
+**Why it matters:** Attackers base64-encode PowerShell and C2 payloads to evade keyword matching. This turns the encoded blob back into readable script. It is the single most useful command for turning an opaque detection into an actionable one.
+
+---
+
+### 10. `sort-csv` — merge and order timelines
+
+> *"Sort a Hayabusa CSV by timestamp and remove duplicate detections."*
+
+**What it does:** Sorts one or many Hayabusa CSVs by timestamp and removes duplicate detections.
+
+```powershell
+.\hayabusa.exe sort-csv -f report.csv -o sorted.csv -C
+.\hayabusa.exe sort-csv -d ".\exports" -o merged.csv -C     # merge many
+```
+
+**Why it matters:** You will often collect CSVs from several machines or several tools. `sort-csv` merges them into one chronological timeline with duplicates removed.
+
+> **⚠️ It takes `-f <FILE>` or `-d <DIR>` — not `-i`.** Using `-i` fails with `unexpected argument '-i' found`.
+
+**Verified:** 392 rows in → 392 rows out, but **re-ordered by timestamp** (unsorted file started at `2017-06-10` then `2019-03-25`; sorted file goes `2017-06-10` → `2019-03-18` → `2019-03-18`).
+
+---
+
+### 11. `list-profiles` — what output shapes are available?
+
+> *"List the output profiles for the DFIR timeline."*
+
+**What it does:** Prints all 8 output profiles and the exact fields each one contains.
+
+```powershell
+.\hayabusa.exe list-profiles
+```
+
+```
+minimal, standard, verbose, all-field-info, all-field-info-verbose,
+super-verbose, timesketch-minimal, timesketch-verbose
+```
+
+**Why it matters:** A profile is a saved column set. `standard` = the 10 columns in the README's Step 5 table. `verbose` adds `MitreTactics` / `MitreTags`. `timesketch-*` is pre-shaped for Timesketch import.
+
+---
+
+### 12. `set-default-profile` — change the default columns
+
+> *"Set default output profile for the DFIR timeline."*
+
+**What it does:** Changes which profile is used when you don't pass `-p`.
+
+```powershell
+.\hayabusa.exe set-default-profile -p verbose
+```
+
+**Writes to:** `config\default_profile_name.txt`
+
+**Why it matters:** Stops you typing `-p verbose` on every command. **⚠️ It rewrites `config\default_profile.yaml` with different line endings**, which shows up as a spurious diff in git — expect it and don't commit it blindly.
+
+---
+
+### 13. `level-tuning` — adjust severities per rule
+
+> *"Tune alert levels for the DFIR timeline."*
+
+**What it does:** Applies the per-rule severity overrides from `rules\config\level_tuning.txt` to the actual rule files.
+
+```powershell
+.\hayabusa.exe level-tuning -f ".\rules\config\level_tuning.txt"
+```
+
+**Output** — current → tuned level per rule:
+```
+path: ./rules\sigma\builtin\process_creation\proc_creation_win_hktl_rubeus.yml
+level: critical -> high
+path: ./rules\sigma\builtin\security\win_security_ad_replication_machine_account.yml
+level: medium -> critical
+```
+
+**Why it matters:** Rule authors set a default severity. **Your environment decides the real one.** If DCSync never occurs legitimately in your org, it is not a `medium` — it is a `critical`. This is how you tune a community rule set without forking it.
+
+> **⚠️ This command MODIFIES RULE FILES IN PLACE.** After running it, `git status` shows the changed `.yml` files. Run `git checkout -- rules/` to revert if you were only experimenting.
+
+---
+
+### 14. `update-rules` — pull the latest detections
+
+> *"Update to the latest rules in the hayabusa-rules github repository."*
+
+**What it does:** Pulls the newest rules from [Yamato-Security/hayabusa-rules](https://github.com/Yamato-Security/hayabusa-rules).
+
+```powershell
+.\hayabusa.exe update-rules
+.\hayabusa.exe update-rules -r "C:\MyRules"    # custom location
+```
+
+**Why it matters:** The rule set grows every week. A new technique gets a new rule — and your tool becomes more valuable the longer you keep it.
+
+> **⚠️ Requires internet.** Not needed in class, and it will **restore the 35 upstream doc/script files** that were trimmed from this local clone. Run it only when you actually want fresh rules.
+
+---
+
+### 15. `expand-list` — show rule placeholders
+
+> *"Extract expand placeholders from the rules folder."*
+
+**What it does:** Lists the placeholder variables that rules can be expanded with.
+
+```powershell
+.\hayabusa.exe expand-list
+```
+
+**Output:**
+```
+10 unique expand placeholders found:
+Admins_Workstations, internal_domains, DC-MACHINE-NAME, known_cdcs,
+userdomain, Workstations, legit_ips, dc_ip_addresses,
+dc_machine_accounts, domain_controller_hostnames
+```
+
+**Why it matters:** Some rules are *generic* ("a domain controller did X"). Expand placeholders let you tell Hayabusa **your** domain controllers and workstations, turning a generic rule into one that knows your estate.
+
+---
+
+### 16. `list-contributors` — who built this?
+
+> *"Print the list of contributors."*
+
+**What it does:** Lists the developers and rule authors.
+
+```powershell
+.\hayabusa.exe list-contributors
+```
+
+**Output includes:**
+```
+Zach Mathis (@yamatosecurity, Yamato Security Founder): Project leader, tool and concept design, rule creation and tuning
+Yusuke Matsui (@apt773): AD hacking working group leader, rule testing, documentation, research
+ItiB (@itiB_S144): Core developer (sigmac hayabusa backend, search command)
+James Takai / hachiyone: Second lead developer (Tokio multi-threading, sigma aggregation logic)
+...
+```
+
+**Why it matters:** Credibility and context. **Zach Mathis is the founder and also the most prolific rule author (31 rules)** — the Step 3 author table is not a coincidence.
+
+> The tool also credits **Omer BenAmram** for the Rust `evtx` crate — the parser library underneath the whole engine.
+
+---
+
+### 17. `help` — the built-in manual
+
+> *"Print this message or the help of the given subcommand(s)."*
+
+```powershell
+.\hayabusa.exe help
+.\hayabusa.exe dfir-timeline -h
+.\hayabusa.exe search -h
+```
+
+**Why it matters:** Every flag in this guide came from here. **Always check `-h` before assuming a flag's meaning** — `-a` and `-F` mean different things in `search` and `dfir-timeline`.
+
+---
+
+### 18. `config-critical-systems` · `expand-list` · `extract-base64` · `level-tuning` — the tuning layer
+
+Covered above (items 8, 9, 13, 15). These four exist for one reason: **the rules are community knowledge, and a deployment must adapt them to its own environment** without forking the rule set.
+
+---
+
+## 6b. Quick reference table
+
 ### The four you will use in class
 
 | Command | Purpose | Used in |
@@ -1094,7 +1441,7 @@ Hayabusa v4.2.0 ships **18 subcommands**. Everything the tool can do is on this 
 | `log-metrics` | Per-file metadata: size, channel, provider, first/last event | Great for log triage |
 | `logon-summary` | Successful/failed logon breakdown | Writes `*-successful.csv` + `*-failed.csv` |
 | `pivot-keywords-list` | Extract pivot keywords into `pivot-*.txt` files | 12 files written: users, IPs, processes, command lines, logon IDs |
-| `config-critical-systems` | Identify domain controllers and file servers | Finds DCs via Security **4768**, file servers via **5145** |
+| `config-critical-systems` | Identify domain controllers and file servers | Finds DCs via Security **4768**, file servers via **5145** · **do not pipe** |
 | `extract-base64` | Extract and decode base64 blobs from events | Excellent for decoding obfuscated PowerShell |
 
 ### Rule and configuration management
@@ -1102,7 +1449,7 @@ Hayabusa v4.2.0 ships **18 subcommands**. Everything the tool can do is on this 
 | Command | Purpose | Notes |
 |---|---|---|
 | `update-rules` | Pull the latest rules from `hayabusa-rules` | **Requires internet** — not needed in class |
-| `level-tuning` | Adjust alert levels per rule | Writes `rules\config\level_tuning.txt` |
+| `level-tuning` | Adjust alert levels per rule | **Modifies rule files in place** |
 | `expand-list` | List expand placeholders in the rules folder | 19 expand rules in this set |
 | `list-contributors` | Print the rule contributors | Same authors as the Step 3 table |
 | `help` | Print help for any subcommand | `hayabusa.exe dfir-timeline -h` |
@@ -1314,6 +1661,10 @@ Useful flags, memorised in one line: **`-w`** no wizard · **`-C`** overwrite ·
 | `-F` behaves unexpectedly | `-F` = field filter in `search`, but `--no-field-data-mapping` in `dfir-timeline` | run `hayabusa.exe <subcommand> -h` to confirm |
 | `-a` behaves unexpectedly | `-a` = AND-logic in `search`, but `--scan-all-evtx-files` in `dfir-timeline` | same — check `-h` |
 | Chinese/Japanese text in output | Hayabusa prints a Japanese proverb on exit | cosmetic, ignore |
+| `config-critical-systems` panics with `not a terminal` | it calls `unwrap()` on a terminal handle and **cannot be piped** | run it bare, straight to the screen — never `\| Select-Object` |
+| `level-tuning` changed my rule files | it **modifies rules in place** to apply `level_tuning.txt` | `git checkout -- rules/` to revert after experimenting |
+| `set-default-profile` shows up as a git diff | it rewrites `config\default_profile.yaml` with different line endings | `git checkout -- config/default_profile.yaml` if unwanted |
+| `sort-csv -i <file>` → `unexpected argument '-i' found` | it takes `-f <FILE>` or `-d <DIR>` | use `-f` |
 
 Three accuracy notes worth knowing before someone asks:
 
